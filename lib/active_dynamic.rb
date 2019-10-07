@@ -1,0 +1,12 @@
+require 'active_record'
+
+require 'active_dynamic/data_type'
+require 'active_dynamic/attribute_definition'
+require 'active_dynamic/field_settings_definition'
+require 'active_dynamic/field_values_definition'
+require 'active_dynamic/attribute'
+require 'active_dynamic/has_dynamic_attributes'
+require 'active_dynamic/active_record'
+require 'active_dynamic/configuration'
+require 'active_dynamic/null_provider'
+require 'active_dynamic/version'
