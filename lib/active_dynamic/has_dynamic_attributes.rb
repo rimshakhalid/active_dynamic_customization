@@ -154,6 +154,7 @@ module ActiveDynamic
           child_settings.each do |entity|
               attributes << ActiveDynamic::Field.find(entity['field_id']) unless search(attributes, 'id', entity['field_id'])
           end
+          settings = child_settings
         else
           settings.each_value do |entity|
             entity.each do |field|
@@ -175,8 +176,11 @@ module ActiveDynamic
           end
          end
       else
+        values = []
         db_settings = ActiveDynamic::Values.find_by(customizable_id: self.id, customizable_type: self.class.name)
-        values = JSON.parse(db_settings.values)
+        if db_settings
+          values = JSON.parse(db_settings.values)
+        end
         attributes.each do |field|
           if field.source_type == self.class.name
             values << ActiveDynamic::FieldValuesDefinition.new(field_id: field.id, field_name: field.system_name) unless search(values, 'field_id', field.id)
@@ -221,6 +225,7 @@ module ActiveDynamic
       fields = dynamic_attr['fields']
       values = dynamic_attr['values']
       values.each do |ticket_field|
+        ticket_field = Hash(ticket_field) unless ticket_field.class == Hash
         field = ActiveDynamic::Field.find(ticket_field['field_id'])
         _custom_fields[field.system_name] = {value: ticket_field['value'], vocab_value: ticket_field['vocab_value'] }
       end
@@ -268,6 +273,7 @@ module ActiveDynamic
         values = dynamic_attributes['values']
         latest = []
         values.each do |ticket_field|
+          ticket_field = Hash(ticket_field) unless ticket_field.class == Hash
           field = ActiveDynamic::Field.find(ticket_field['field_id'])
           row = {}
           if !_custom_fields[field.system_name].nil?
@@ -285,11 +291,12 @@ module ActiveDynamic
     end
 
     def update_ids
+      binding.pry
       if self.get_dynamic_initializer[:parent_entity].nil?
         @entity_settings.customizable_id = self.id
         @entity_settings.save
       end
-      if self.get_dynamic_initializer[:parent_entity].nil? || (!self.get_dynamic_initializer[:parent_entity].nil? && persisted?)
+      if self.get_dynamic_initializer[:parent_entity].nil? || @entity_values.present?
         @entity_values.customizable_id = self.id
         @entity_values.save
       end
