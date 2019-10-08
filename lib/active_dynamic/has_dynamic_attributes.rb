@@ -3,14 +3,12 @@ module ActiveDynamic
     extend ActiveSupport::Concern
 
     included do
-      # has_many :field_settings,
-      #          autosave: true,
-      #          dependent: :destroy,
-      #          as: :customizable
-      # has_many :field_values,
-      #          autosave: true,
-      #          dependent: :destroy,
-      #          as: :customizable
+      has_many :field_settings,
+               autosave: true,
+               dependent: :destroy
+      has_many :field_values,
+               autosave: true,
+               dependent: :destroy
       before_save :save_fields, :save_settings, :save_values
       after_save :update_ids
     end
@@ -32,15 +30,19 @@ module ActiveDynamic
 
     def dynamic_attributes
       attrs = {}
-      attrs['fields'] = resolve_from_provider
       if persisted? && any_dynamic_attributes?
-        setting = get_settings(attrs['fields'])
-        attrs['settings'] = setting[0]
-        attrs['fields'] = setting[1]
+        if should_resolve_persisted?
+          attrs['fields'] = resolve_combined
+        else
+          attrs['fields'] = resolve_from_db
+        end
       else
-        attrs['settings'] = get_settings(attrs['fields'])[0]
+        attrs['fields'] = resolve_from_provider
       end
-      attrs['values'] = get_dynamic_values(attrs['fields'])
+      setting = get_settings(attrs['fields'])
+      attrs['settings'] = setting[0]
+      attrs['fields'] = setting[1]
+      attrs['values'] = get_dynamic_values(setting[0][self.class.name])
       attrs
     end
 
@@ -66,6 +68,26 @@ module ActiveDynamic
       end
     end
 
+    def create_dynamic(new_field)
+      field_def = ActiveDynamic::FieldDefinition.new(new_field[:system_name], new_field)
+      field = ActiveDynamic::Field.create(field_def.as_json)
+      field.save
+      current = dynamic_attributes['settings']
+      current[field.source_type] << JSON.parse({field_id: field.id, is_visible: true, is_tomstone: false}.to_json)
+      update_field_settings(current[field.source_type], field.source_type)
+      # latest = {system_name: 'agent', is_custom: true, source_type: 'CollectionResource', column_type: 4}
+    end
+
+    def delete_dynamic(field)
+      current = dynamic_attributes['settings']
+      index = search(current[field.source_type], 'field_id', field.id)
+      if index
+        current[field.source_type].delete_at(index)
+      end
+      update_field_settings(current[field.source_type], field.source_type)
+      ActiveDynamic::Field.delete(field.id)
+      # latest = {system_name: 'agent1', is_custom: true, source_type: 'CollectionResource', column_type: 4}
+    end
 
     def update_field_settings(new_settings, type=nil)
       ## TODO manage for collection resource, update settings of specific type
@@ -76,7 +98,7 @@ module ActiveDynamic
         current[type] = new_settings
       end
       @field_setting = ActiveDynamic::Settings.find_or_initialize_by(customizable_id: self.id, customizable_type: self.class.name)
-      @field_setting.update({settings: current})
+      @field_setting.update({settings: current.to_json})
     end
 
     private
@@ -131,6 +153,7 @@ module ActiveDynamic
     end
 
     def get_settings(attributes)
+      attributes = attributes.to_a
       settings = {}
       if self.id.nil?
         attributes.each do |field|
@@ -158,6 +181,7 @@ module ActiveDynamic
         else
           settings.each_value do |entity|
             entity.each do |field|
+              puts field['field_id']
               attributes << ActiveDynamic::Field.find(field['field_id']) unless search(attributes, 'id', field['field_id'])
              end
           end
@@ -171,9 +195,8 @@ module ActiveDynamic
       values = []
       if self.id.nil?
         attributes.each do |field|
-          if field.source_type == self.class.name
-            values << ActiveDynamic::FieldValuesDefinition.new(field_id: field.id, field_name: field.system_name)
-          end
+            field = JSON.parse(field.to_json) unless field.class == Hash
+            values << ActiveDynamic::FieldValuesDefinition.new(field_id: field['field_id'], field_name: field['field_name'])
          end
       else
         values = []
@@ -182,30 +205,38 @@ module ActiveDynamic
           values = JSON.parse(db_settings.values)
         end
         attributes.each do |field|
-          if field.source_type == self.class.name
-            values << ActiveDynamic::FieldValuesDefinition.new(field_id: field.id, field_name: field.system_name) unless search(values, 'field_id', field.id)
-          end
+          field = JSON.parse(field.to_json) unless field.class == Hash
+          values << ActiveDynamic::FieldValuesDefinition.new(field_id: field['field_id'], field_name: field['field_name'])  unless search(values, 'field_id', field['field_id'])
         end
       end
       values
     end
 
     def search(array, key, value)
-      array.any?{|hash| hash[key] == value}
+      array.index {|hash| hash[key] == value}
     end
 
-    def generate_accessors(fields)
-      fields.each do |field|
-        if field.source_type == self.class.name
-          add_presence_validator(field.system_name) if field.is_required?
+    def custom
 
-          define_singleton_method(field.system_name) do
-            _custom_fields[field.system_name]
-          end
+    end
 
-          define_singleton_method("#{field.system_name}=") do |value|
-            _custom_fields[field.system_name] = value && value.to_s.strip
-          end
+    def generate_accessors(field)
+      if field.is_required
+        add_presence_validator(field.system_name)
+      end
+
+
+      define_singleton_method(field.system_name) do
+        _custom_fields[field.system_name]
+      end
+
+      define_singleton_method("#{field.system_name}=") do |value|
+        return "Please provide Hash" unless value.class == Hash
+        if value[:value].present?
+          _custom_fields[field.system_name]['value'] = value[:value].to_s.strip
+        end
+        if value[:vocab_value].present?
+          _custom_fields[field.system_name]['vocab_value'] = value[:vocab_value].to_s.strip
         end
       end
     end
@@ -225,12 +256,13 @@ module ActiveDynamic
       fields = dynamic_attr['fields']
       values = dynamic_attr['values']
       values.each do |ticket_field|
-        ticket_field = Hash(ticket_field) unless ticket_field.class == Hash
+        ticket_field = JSON.parse(ticket_field.to_json) unless ticket_field.class == Hash
         field = ActiveDynamic::Field.find(ticket_field['field_id'])
         _custom_fields[field.system_name] = {value: ticket_field['value'], vocab_value: ticket_field['vocab_value'] }
+        generate_accessors field
       end
 
-      generate_accessors fields
+      # generate_accessors fields
       @dynamic_attributes_loaded = true
     end
 
@@ -273,9 +305,9 @@ module ActiveDynamic
         values = dynamic_attributes['values']
         latest = []
         values.each do |ticket_field|
-          ticket_field = Hash(ticket_field) unless ticket_field.class == Hash
+          ticket_field = JSON.parse(ticket_field.to_json) unless ticket_field.class == Hash
           field = ActiveDynamic::Field.find(ticket_field['field_id'])
-          row = {}
+          row = {value: '', vocab_value: ''}
           if !_custom_fields[field.system_name].nil?
             puts  _custom_fields[field.system_name]
             row[:value] = _custom_fields[field.system_name]['value']
@@ -291,7 +323,6 @@ module ActiveDynamic
     end
 
     def update_ids
-      binding.pry
       if self.get_dynamic_initializer[:parent_entity].nil?
         @entity_settings.customizable_id = self.id
         @entity_settings.save
